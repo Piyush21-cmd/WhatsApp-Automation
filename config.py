@@ -1,47 +1,53 @@
 """
-Configuration manager loading environment variables safely.
+Configuration manager loading environment variables safely for Twilio WhatsApp integration.
 """
 
 import os
-from dataclasses import dataclass
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env file from the current working directory or parent directories
-load_dotenv()
+# Force load .env from the project root directory
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 
-@dataclass(frozen=True)
 class Config:
-    # Meta WhatsApp API
-    ACCESS_TOKEN: str = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-    PHONE_NUMBER_ID: str = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-    BUSINESS_ACCOUNT_ID: str = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
-    API_VERSION: str = os.getenv("WHATSAPP_API_VERSION", "v19.0")
+    @property
+    def TWILIO_ACCOUNT_SID(self) -> str:
+        return os.getenv("TWILIO_ACCOUNT_SID", "").strip("'\" ")
 
-    # Database & Storage
-    DATABASE_PATH: Path = Path(os.getenv("DATABASE_PATH", "data/recipients.db"))
+    @property
+    def TWILIO_AUTH_TOKEN(self) -> str:
+        return os.getenv("TWILIO_AUTH_TOKEN", "").strip("'\" ")
 
-    # Engine Settings
-    RATE_LIMIT_DELAY_SECONDS: float = float(
-        os.getenv("RATE_LIMIT_DELAY_SECONDS", "1.5")
-    )
-    MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
-    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    @property
+    def TWILIO_WHATSAPP_NUMBER(self) -> str:
+        return os.getenv("TWILIO_WHATSAPP_NUMBER", "+17372212163").strip("'\" ")
 
-    def validate(self) -> None:
+    @property
+    def DATABASE_PATH(self) -> Path:
+        return Path(os.getenv("DATABASE_PATH", "data/recipients.db"))
+
+    @property
+    def RATE_LIMIT_DELAY_SECONDS(self) -> float:
+        return float(os.getenv("RATE_LIMIT_DELAY_SECONDS", "1.5"))
+
+    @property
+    def MAX_RETRIES(self) -> int:
+        return int(os.getenv("MAX_RETRIES", "3"))
+
+    @property
+    def LOG_LEVEL(self) -> str:
+        return os.getenv("LOG_LEVEL", "INFO")
+
+    def validate(self) -> list[str]:
         """Validates that necessary operational environment variables exist."""
         missing = []
-        if not self.ACCESS_TOKEN:
-            missing.append("WHATSAPP_ACCESS_TOKEN")
-        if not self.PHONE_NUMBER_ID:
-            missing.append("WHATSAPP_PHONE_NUMBER_ID")
-
-        if missing:
-            raise ValueError(
-                f"Missing critical configuration variables: {', '.join(missing)}. "
-                f"Please update your .env file."
-            )
+        if not self.TWILIO_ACCOUNT_SID:
+            missing.append("TWILIO_ACCOUNT_SID")
+        if not self.TWILIO_AUTH_TOKEN:
+            missing.append("TWILIO_AUTH_TOKEN")
+        return missing
 
 
 config = Config()

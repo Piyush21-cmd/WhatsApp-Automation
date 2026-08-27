@@ -1,13 +1,15 @@
 """
-Messaging engine abstraction, Meta WhatsApp Cloud API integration,
+Messaging engine abstraction, Twilio WhatsApp integration,
 rate limiting, retry mechanics, and message history logging.
 """
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple
-import requests
+from twilio.base.exceptions import TwilioRestException
+from twilio.rest import Client
 
 from config import config
 from database import db
@@ -21,12 +23,14 @@ logging.basicConfig(level=config.LOG_LEVEL)
 
 class MessagingError(Exception):
     """Custom exception raised for unrecoverable messaging errors."""
+
     pass
 
 
 # ============================================================================
 # Provider Abstraction Interface
 # ============================================================================
+
 
 class BaseMessagingProvider(ABC):
     """
@@ -49,78 +53,59 @@ class BaseMessagingProvider(ABC):
 
 
 # ============================================================================
-# Meta WhatsApp Cloud API Implementation
+# Twilio WhatsApp Implementation
 # ============================================================================
 
-class MetaWhatsAppProvider(BaseMessagingProvider):
+
+import json
+
+class TwilioWhatsAppProvider(BaseMessagingProvider):
     """
-    Official Meta WhatsApp Cloud API Provider Client.
-    Uses Graph API endpoints.
+    Official Twilio WhatsApp Provider Client.
     """
 
     def __init__(self):
-        config.validate()  # Verify token & phone_number_id exist
-        self.access_token = config.ACCESS_TOKEN
-        self.phone_number_id = config.PHONE_NUMBER_ID
-        self.api_version = config.API_VERSION
-        self.url = f"https://graph.facebook.com/{self.api_version}/{self.phone_number_id}/messages"
-        self.headers = {
-            "Authorization": f"Bearer {self.access_token}",
-            "Content-Type": "application/json",
-        }
+        config.validate()
+        self.account_sid = config.TWILIO_ACCOUNT_SID
+        self.auth_token = config.TWILIO_AUTH_TOKEN
+        self.from_number = config.TWILIO_WHATSAPP_NUMBER
+        self.client = Client(self.account_sid, self.auth_token)
 
     def send_text_message(
         self, recipient_phone: str, message_text: str
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
-        Dispatches a WhatsApp message using Meta's Cloud API text payload format.
+        Dispatches a WhatsApp message using your account's Sandbox Content Template SID.
         """
-        # Ensure recipient phone has no leading '+' for Meta payload (e.g., '919876543210')
-        formatted_phone = recipient_phone.lstrip("+")
+        formatted_from = f"whatsapp:{self.from_number}"
+        formatted_to = f"whatsapp:{recipient_phone if recipient_phone.startswith('+') else '+' + recipient_phone}"
 
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": formatted_phone,
-            "type": "text",
-            "text": {
-                "preview_url": False,
-                "body": message_text,
-            },
-        }
+        # PASTE THE HX... SID COPIED FROM THE API TAB HERE:
+        my_account_template_sid = "HXb5b62575e6e4ff6129ad7c8efe1f983e"
 
         try:
-            response = requests.post(
-                self.url,
-                json=payload,
-                headers=self.headers,
-                timeout=15.0,  # 15-second HTTP timeout guard
+            # Send via your active Sandbox Content Template
+            message = self.client.messages.create(
+                from_=formatted_from,
+                to=formatted_to,
+                content_sid="HXac51c61af94371da7904a767b414c2fc",
+                content_variables=json.dumps({"1": message_text})
             )
-            data = response.json()
+            return True, message.sid, None
 
-            if response.status_code in (200, 201):
-                # Successfully dispatched to Meta
-                messages = data.get("messages", [])
-                provider_msg_id = messages[0].get("id") if messages else None
-                return True, provider_msg_id, None
-            else:
-                # Handle Meta-specific error structure
-                error_obj = data.get("error", {})
-                error_msg = error_obj.get("message", f"HTTP {response.status_code}: {response.text}")
-                error_code = error_obj.get("code")
-                full_err_desc = f"Meta API Error [{error_code}]: {error_msg}"
-                logger.error(f"Failed sending to {recipient_phone}: {full_err_desc}")
-                return False, None, full_err_desc
-
-        except requests.exceptions.RequestException as exc:
-            err_msg = f"Network communication error: {str(exc)}"
-            logger.error(f"Request failed for {recipient_phone}: {err_msg}")
-            return False, None, err_msg
-
+        except TwilioRestException as exc:
+            error_desc = f"Twilio API Error [{exc.code}]: {exc.msg}"
+            logger.error(f"Failed sending to {recipient_phone}: {error_desc}")
+            return False, None, error_desc
+        except Exception as exc:
+            error_desc = f"Unexpected Error: {str(exc)}"
+            logger.error(f"Failed sending to {recipient_phone}: {error_desc}")
+            return False, None, error_desc
 
 # ============================================================================
 # Rate Limiting Engine
 # ============================================================================
+
 
 class RateLimiter:
     """Controls the dispatch rate between consecutive message attempts."""
@@ -141,6 +126,7 @@ class RateLimiter:
 # ============================================================================
 # Message History Audit Logging
 # ============================================================================
+
 
 class MessageLogRepository:
     """Manages persistent audit records for sent and failed messages."""
@@ -203,6 +189,7 @@ class MessageLogRepository:
 # Messaging Orchestrator (Sending Engine)
 # ============================================================================
 
+
 class MessagingEngine:
     """
     Coordinates provider delivery, rate-limiting delays, automatic retries,
@@ -215,7 +202,7 @@ class MessagingEngine:
         rate_limiter: Optional[RateLimiter] = None,
         max_retries: int = config.MAX_RETRIES,
     ):
-        self.provider = provider or MetaWhatsAppProvider()
+        self.provider = provider or TwilioWhatsAppProvider()
         self.rate_limiter = rate_limiter or RateLimiter()
         self.log_repo = MessageLogRepository()
         self.max_retries = max_retries
@@ -224,7 +211,6 @@ class MessagingEngine:
         """
         Sends a single personalized message with retry mechanics and rate limiting.
         """
-        # Interpolate variables like {name}
         final_message = MessageRepository.render_personalized_message(
             raw_message, recipient
         )
@@ -234,7 +220,6 @@ class MessagingEngine:
         error_msg = None
 
         for attempt in range(1, self.max_retries + 1):
-            # Apply rate limiting pause before transmitting
             self.rate_limiter.wait()
 
             logger.info(
@@ -242,15 +227,16 @@ class MessagingEngine:
                 f"[Attempt {attempt}/{self.max_retries}]..."
             )
 
-            success, provider_msg_id, error_msg = self.provider.send_text_message(
-                recipient.phone_number, final_message
+            success, provider_msg_id, error_msg = (
+                self.provider.send_text_message(
+                    recipient.phone_number, final_message
+                )
             )
 
             if success:
                 logger.info(f"Successfully sent message to {recipient.name}")
                 break
-            
-            # If failed and attempts remain, delay before retrying (exponential backoff)
+
             if attempt < self.max_retries:
                 backoff_time = attempt * 2.0
                 logger.warning(
@@ -260,7 +246,6 @@ class MessagingEngine:
 
         status = DeliveryStatus.SENT if success else DeliveryStatus.FAILED
 
-        # Log result persistently
         return self.log_repo.log_message(
             recipient_id=recipient.id,
             message_text=final_message,
@@ -274,14 +259,10 @@ class MessagingEngine:
     ) -> List[Tuple[Recipient, MessageLog]]:
         """
         Dispatches customized messages sequentially to a batch of recipients.
-
-        :param items: List of tuples containing (Recipient, raw_message_text)
-        :return: List of tuples containing (Recipient, MessageLog)
         """
         results = []
         for recipient, message_text in items:
             if not message_text or not message_text.strip():
-                # Log skipped/failed message if body is missing
                 log_entry = self.log_repo.log_message(
                     recipient_id=recipient.id,
                     message_text="",
