@@ -1,4 +1,11 @@
+# Existing Core Dependencies
 requests>=2.31.0
 python-dotenv>=1.0.1
 phonenumbers>=8.13.30
 pytest>=8.0.0
+
+# Messaging Provider SDK
+twilio>=9.11.0
+
+# Terminal UI & Formatting Engine
+rich>=13.7.0
